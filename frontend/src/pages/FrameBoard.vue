@@ -8,6 +8,7 @@ import { storeToRefs } from 'pinia';
 import { useShotStore } from '../stores/shotStore';
 import { useFrameStore } from '../stores/frameStore';
 import { useFrameSequence } from '../hooks/useFrameSequence';
+import { useFrameHistory } from '../hooks/useFrameHistory';
 import { useLocalDraft } from '../hooks/useLocalDraft';
 import { durationToFrames, framesToDuration } from '../utils/frameMath';
 import { APERTURE_OPTIONS, EXPOSURE_OPTIONS, ISO_OPTIONS, SHUTTER_ANGLE_OPTIONS } from '../utils/exposure';
@@ -23,6 +24,7 @@ const frameStore = useFrameStore();
 const { shots } = storeToRefs(shotStore);
 const { frames, selectedFrameNo } = storeToRefs(frameStore);
 const { insertAfter, removeAt, move, patch, select, syncShotRange, totalDuration, fps } = useFrameSequence();
+const { init: initHistory, run: runHistory, undo, redo, canUndo, canRedo } = useFrameHistory();
 
 const activeShotId = ref<number | null>(null);
 const feedback = ref('');
@@ -55,14 +57,12 @@ const shutterOptions = SHUTTER_ANGLE_OPTIONS;
 onMounted(async () => {
   if (!shotStore.ready) await shotStore.load();
   const first = shots.value[0];
-  if (first && typeof first.id === 'number') {
-    activeShotId.value = first.id;
-    await frameStore.loadForShot(first.id);
-  }
+  // 仅设置镜头：下方 watch 会统一走 initHistory 载入帧序与历史，避免重复初始化
+  if (first && typeof first.id === 'number') activeShotId.value = first.id;
 });
 
 watch(activeShotId, async (id) => {
-  if (typeof id === 'number') await frameStore.loadForShot(id);
+  if (typeof id === 'number') await initHistory(id);
 });
 
 function flash(text: string) {
@@ -74,12 +74,16 @@ function flash(text: string) {
 
 async function doInsert() {
   if (activeShotId.value === null) return;
-  await insertAfter(selectedFrameNo.value);
-  const created = frames.value.find((f) => f.frameNo === (selectedFrameNo.value ?? 0) + 1) ?? frames.value[frames.value.length - 1];
-  if (created) {
-    await patch(created.frameNo, newFrame.value);
-    select(created.frameNo);
-  }
+  // 「插入 + 写入新帧参数 + 选中」对动画师是一次编排动作，合并成一个历史步
+  await runHistory(async () => {
+    await insertAfter(selectedFrameNo.value);
+    const created =
+      frames.value.find((f) => f.frameNo === (selectedFrameNo.value ?? 0) + 1) ?? frames.value[frames.value.length - 1];
+    if (created) {
+      await patch(created.frameNo, newFrame.value);
+      select(created.frameNo);
+    }
+  });
   flash('已插入一帧并重排序号');
 }
 
@@ -88,18 +92,18 @@ async function doRemove() {
     flash('请先点选要删除的帧');
     return;
   }
-  await removeAt(selectedFrameNo.value);
+  await runHistory(() => removeAt(selectedFrameNo.value as number));
   flash('已删除该帧并重排序号');
 }
 
 async function doReorder(from: number, to: number) {
-  await move(from, to);
+  await runHistory(() => move(from, to));
   flash(`已把第 ${from + 1} 个色块移动到第 ${to + 1} 位`);
 }
 
 async function doBatch() {
   if (activeShotId.value === null) return;
-  await frameStore.applyBatch({ ...batch.value });
+  await runHistory(() => frameStore.applyBatch({ ...batch.value }));
   flash('已对全部帧批量套用曝光参数');
 }
 
@@ -109,19 +113,34 @@ async function doBatchSelectedOnly() {
     return;
   }
   const index = ordered.value.findIndex((f) => f.frameNo === selectedFrameNo.value);
-  await frameStore.applyBatch({ ...batch.value }, [index]);
+  await runHistory(() => frameStore.applyBatch({ ...batch.value }, [index]));
   flash('已对选中帧套用曝光参数');
 }
 
 async function patchFrame(frameNo: number, value: Partial<FrameEntry>) {
-  await patch(frameNo, value);
+  await runHistory(() => patch(frameNo, value));
 }
 
 function shiftFrame(frame: FrameEntry, dir: -1 | 1) {
   const index = ordered.value.findIndex((f) => f.frameNo === frame.frameNo);
   const target = index + dir;
   if (target < 0 || target >= ordered.value.length) return;
-  void move(index, target);
+  void runHistory(() => move(index, target));
+}
+
+async function doSyncRange() {
+  const changed = await runHistory(() => syncShotRange());
+  if (changed) flash('已按当前帧数重算时长');
+}
+
+async function doUndo() {
+  const changed = await undo();
+  if (changed) flash('已撤销上一步编排');
+}
+
+async function doRedo() {
+  const changed = await redo();
+  if (changed) flash('已重做该步编排');
 }
 </script>
 
@@ -162,9 +181,31 @@ function shiftFrame(frame: FrameEntry, dir: -1 | 1) {
         <div class="panel-head">
           <h2>帧序条带</h2>
           <div class="head-actions">
+            <div class="history-group" role="group" aria-label="撤销重做">
+              <button
+                type="button"
+                class="btn small"
+                data-testid="board-undo"
+                :disabled="!canUndo"
+                title="撤销上一步编排（保留最近 20 步）"
+                @click="doUndo"
+              >
+                撤销
+              </button>
+              <button
+                type="button"
+                class="btn small"
+                data-testid="board-redo"
+                :disabled="!canRedo"
+                title="重做已撤销的编排（新动作发生后作废）"
+                @click="doRedo"
+              >
+                重做
+              </button>
+            </div>
             <button type="button" class="btn small" data-testid="board-insert" @click="doInsert">插入帧</button>
             <button type="button" class="btn small danger" data-testid="board-remove" @click="doRemove">删除选中帧</button>
-            <button type="button" class="btn small" @click="syncShotRange">重算时长</button>
+            <button type="button" class="btn small" @click="doSyncRange">重算时长</button>
           </div>
         </div>
         <FrameStrip :frames="ordered" :selected="selectedFrameNo" @update:selected="select" @reorder="doReorder" @patch="patchFrame" />
@@ -265,6 +306,13 @@ h1 {
   display: flex;
   gap: 8px;
   align-items: center;
+}
+.history-group {
+  display: flex;
+  gap: 4px;
+  padding-right: 8px;
+  margin-right: 2px;
+  border-right: 1px solid #e2e7ef;
 }
 .shot-select {
   height: 32px;

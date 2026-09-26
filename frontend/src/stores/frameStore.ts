@@ -101,6 +101,26 @@ export const useFrameStore = defineStore('frame', {
       this.dirty = true;
       await this.persist();
     },
+    /**
+     * 撤销 / 重做时整体回写某镜头的帧序：
+     * 按快照顺序重排帧号（与编排台 persist 一致的 1..N 位次编号），
+     * 全量替换该镜头帧条目后重新载入，条数与明细随快照一起回退。
+     */
+    async restoreSnapshot(shotId: number, snapshot: FrameEntry[]) {
+      this.shotId = shotId;
+      const ordered = snapshot.map((f, idx) => ({
+        ...toPlain(f),
+        id: undefined,
+        shotId,
+        frameNo: idx + 1,
+      }));
+      await api.replaceShotFrames(shotId, ordered);
+      this.frames = await api.listFrames(shotId);
+      this.dirty = false;
+      if (!this.frames.some((f) => f.frameNo === this.selectedFrameNo)) {
+        this.selectedFrameNo = this.frames.length ? this.frames[0].frameNo : null;
+      }
+    },
     /** 批量套用曝光参数 */
     async applyBatch(batch: BatchExposure, indexes?: number[]) {
       const target = indexes && indexes.length ? new Set(indexes) : null;

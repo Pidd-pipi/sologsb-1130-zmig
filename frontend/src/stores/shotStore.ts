@@ -65,6 +65,18 @@ export const useShotStore = defineStore('shot', {
       this.currentId = id;
       return saved;
     },
+    /**
+     * 撤销 / 重做时直接写回镜头的时长与帧区间（按快照原值，不做重算），
+     * 仅更新这三个字段，避免 update() 的 buildFrameRange / rerangeFrames
+     * 把已经回退的帧序又改一遍。
+     */
+    async restoreRange(shotId: number, range: { durationSec: number; startFrame: number; endFrame: number }) {
+      const existing = this.shots.find((s) => s.id === shotId);
+      if (!existing) return;
+      const next = { ...existing, ...range, updatedAt: Date.now() };
+      await api.updateShot(shotId, toPlain(next));
+      this.shots = this.shots.map((s) => (s.id === shotId ? next : s));
+    },
     /** 改时长/帧率后重排帧区间，并同步到该镜头的全部帧条目 */
     async update(id: number, patch: Partial<Shot>) {
       const existing = this.shots.find((s) => s.id === id);
