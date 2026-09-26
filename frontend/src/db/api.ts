@@ -4,6 +4,7 @@ import type { Shot } from '../types/shot';
 import type { FrameEntry } from '../types/frame';
 import type { PropState } from '../types/prop';
 import type { TakeLog } from '../types/take';
+import type { ShotHistory } from '../types/history';
 
 export async function initDb(): Promise<void> {
   if (!db.isOpen()) await db.open();
@@ -29,10 +30,11 @@ export async function updateShot(id: number, patch: Partial<Shot>): Promise<void
 }
 
 export async function deleteShot(id: number): Promise<void> {
-  await db.transaction('rw', db.shots, db.frames, db.props, db.takes, async () => {
+  await db.transaction('rw', db.shots, db.frames, db.props, db.takes, db.histories, async () => {
     await db.frames.where('shotId').equals(id).delete();
     await db.props.where('shotId').equals(id).delete();
     await db.takes.where('shotId').equals(id).delete();
+    await db.histories.delete(id);
     await db.shots.delete(id);
   });
 }
@@ -81,6 +83,20 @@ export async function replaceShotFrames(shotId: number, frames: FrameEntry[]): P
     await db.frames.where('shotId').equals(shotId).delete();
     if (plain.length) await db.frames.bulkAdd(plain);
   });
+}
+
+/* ---------------- histories ---------------- */
+
+export async function getShotHistory(shotId: number): Promise<ShotHistory | undefined> {
+  return db.histories.get(shotId);
+}
+
+export async function saveShotHistory(record: ShotHistory): Promise<void> {
+  await db.histories.put(toPlain(record));
+}
+
+export async function deleteShotHistory(shotId: number): Promise<void> {
+  await db.histories.delete(shotId);
 }
 
 /* ---------------- props ---------------- */

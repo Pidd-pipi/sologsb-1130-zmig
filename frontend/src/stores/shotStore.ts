@@ -2,6 +2,7 @@
 import { defineStore } from 'pinia';
 import * as api from '../db/api';
 import { toPlain } from '../db';
+import { useHistoryStore } from './historyStore';
 import { buildFrameRange, framesToDuration } from '../utils/frameMath';
 import type { Shot } from '../types/shot';
 import { createEmptyShot } from '../types/shot';
@@ -98,6 +99,7 @@ export const useShotStore = defineStore('shot', {
     },
     async remove(id: number) {
       await api.deleteShot(id);
+      useHistoryStore().forget(id);
       this.shots = this.shots.filter((s) => s.id !== id);
       if (this.currentId === id) this.currentId = null;
     },

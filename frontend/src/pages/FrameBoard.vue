@@ -1,7 +1,8 @@
 <script setup lang="ts">
 /**
  * 帧序编排台：在条带上移动帧、插入或删除帧、批量套用曝光，
- * 改动后重算帧序号与总时长。消费 FrameEntry、Shot。
+ * 改动后重算帧序号与总时长。每个镜头保留最近 20 步编排记录，
+ * 可连续撤销 / 重做，历史随镜头隔离并持久化。消费 FrameEntry、Shot。
  */
 import { computed, onMounted, ref, watch } from 'vue';
 import { storeToRefs } from 'pinia';
@@ -22,7 +23,24 @@ const shotStore = useShotStore();
 const frameStore = useFrameStore();
 const { shots } = storeToRefs(shotStore);
 const { frames, selectedFrameNo } = storeToRefs(frameStore);
-const { insertAfter, removeAt, move, patch, select, syncShotRange, totalDuration, fps } = useFrameSequence();
+const {
+  insertAfter,
+  removeAt,
+  move,
+  patch,
+  select,
+  syncShotRange,
+  totalDuration,
+  fps,
+  applyBatchExposure,
+  undo,
+  redo,
+  ensureHistory,
+  canUndo,
+  canRedo,
+  undoLabel,
+  redoLabel,
+} = useFrameSequence();
 
 const activeShotId = ref<number | null>(null);
 const feedback = ref('');
@@ -58,11 +76,15 @@ onMounted(async () => {
   if (first && typeof first.id === 'number') {
     activeShotId.value = first.id;
     await frameStore.loadForShot(first.id);
+    await ensureHistory();
   }
 });
 
 watch(activeShotId, async (id) => {
-  if (typeof id === 'number') await frameStore.loadForShot(id);
+  if (typeof id === 'number') {
+    await frameStore.loadForShot(id);
+    await ensureHistory();
+  }
 });
 
 function flash(text: string) {
@@ -74,12 +96,11 @@ function flash(text: string) {
 
 async function doInsert() {
   if (activeShotId.value === null) return;
-  await insertAfter(selectedFrameNo.value);
-  const created = frames.value.find((f) => f.frameNo === (selectedFrameNo.value ?? 0) + 1) ?? frames.value[frames.value.length - 1];
-  if (created) {
-    await patch(created.frameNo, newFrame.value);
-    select(created.frameNo);
-  }
+  const anchor = selectedFrameNo.value;
+  // 曝光参数随插入一步写入，撤销时整步回退
+  await insertAfter(anchor, { ...newFrame.value });
+  const createdNo = anchor === null ? frames.value.length : anchor + 1;
+  if (frames.value.some((f) => f.frameNo === createdNo)) select(createdNo);
   flash('已插入一帧并重排序号');
 }
 
@@ -99,7 +120,7 @@ async function doReorder(from: number, to: number) {
 
 async function doBatch() {
   if (activeShotId.value === null) return;
-  await frameStore.applyBatch({ ...batch.value });
+  await applyBatchExposure({ ...batch.value });
   flash('已对全部帧批量套用曝光参数');
 }
 
@@ -109,8 +130,18 @@ async function doBatchSelectedOnly() {
     return;
   }
   const index = ordered.value.findIndex((f) => f.frameNo === selectedFrameNo.value);
-  await frameStore.applyBatch({ ...batch.value }, [index]);
+  await applyBatchExposure({ ...batch.value }, [index]);
   flash('已对选中帧套用曝光参数');
+}
+
+async function doUndo() {
+  const label = await undo();
+  flash(label ? `已撤销：${label}，帧号、张数与时长已回退` : '当前镜头没有可撤销的编排动作');
+}
+
+async function doRedo() {
+  const label = await redo();
+  flash(label ? `已重做：${label}` : '当前镜头没有可重做的编排动作');
 }
 
 async function patchFrame(frameNo: number, value: Partial<FrameEntry>) {
@@ -130,7 +161,7 @@ function shiftFrame(frame: FrameEntry, dir: -1 | 1) {
     <header class="page-head">
       <div>
         <h1>帧序编排台</h1>
-        <p class="sub">在条带上移动、插入、删除帧，并批量套用曝光参数；改动后帧序号与镜头时长即时重算</p>
+        <p class="sub">在条带上移动、插入、删除帧，并批量套用曝光参数；改动后帧序号与镜头时长即时重算，可随时撤销 / 重做</p>
       </div>
       <div class="head-actions">
         <select v-model.number="activeShotId" data-testid="board-shot-select" class="shot-select">
@@ -162,6 +193,27 @@ function shiftFrame(frame: FrameEntry, dir: -1 | 1) {
         <div class="panel-head">
           <h2>帧序条带</h2>
           <div class="head-actions">
+            <span class="muted">每镜头保留最近 20 步</span>
+            <button
+              type="button"
+              class="btn small"
+              data-testid="board-undo"
+              :disabled="!canUndo"
+              :title="canUndo ? `撤销：${undoLabel}` : '暂无可撤销的编排动作'"
+              @click="doUndo"
+            >
+              撤销
+            </button>
+            <button
+              type="button"
+              class="btn small"
+              data-testid="board-redo"
+              :disabled="!canRedo"
+              :title="canRedo ? `重做：${redoLabel}` : '暂无可重做的编排动作'"
+              @click="doRedo"
+            >
+              重做
+            </button>
             <button type="button" class="btn small" data-testid="board-insert" @click="doInsert">插入帧</button>
             <button type="button" class="btn small danger" data-testid="board-remove" @click="doRemove">删除选中帧</button>
             <button type="button" class="btn small" @click="syncShotRange">重算时长</button>

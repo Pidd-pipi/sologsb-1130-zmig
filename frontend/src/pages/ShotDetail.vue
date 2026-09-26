@@ -110,12 +110,11 @@ async function changeFps(value: number) {
 }
 
 async function addFrameWithExposure() {
-  await insertAfter(selectedFrameNo.value ?? frames.value[frames.value.length - 1]?.frameNo ?? null);
-  const last = frames.value[frames.value.length - 1];
-  if (last) {
-    await patch(last.frameNo, exposureDraft.value as Partial<FrameEntry>);
-    select(last.frameNo);
-  }
+  const anchor = selectedFrameNo.value ?? frames.value[frames.value.length - 1]?.frameNo ?? null;
+  // 曝光参数随插入一步写入，撤销时整步回退
+  await insertAfter(anchor, exposureDraft.value as Partial<FrameEntry>);
+  const createdNo = anchor === null ? frames.value.length : anchor + 1;
+  if (frames.value.some((f) => f.frameNo === createdNo)) select(createdNo);
   flash('已在帧序中插入一帧');
 }
 

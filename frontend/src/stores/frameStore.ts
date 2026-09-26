@@ -2,6 +2,7 @@
 import { defineStore } from 'pinia';
 import * as api from '../db/api';
 import { toPlain } from '../db';
+import { useHistoryStore } from './historyStore';
 import { accumulateOffsets, estimateSpeed, frameColor, framesToDuration } from '../utils/frameMath';
 import type { BatchExposure, FrameEntry } from '../types/frame';
 import { createEmptyFrame } from '../types/frame';
@@ -61,7 +62,25 @@ export const useFrameStore = defineStore('frame', {
       this.frames = await api.listFrames(this.shotId);
       this.dirty = false;
     },
+    /** 变更前记录一步编排历史（撤销 / 重做按镜头隔离，由 historyStore 持久化） */
+    async recordHistory(label: string) {
+      if (this.shotId === null) return;
+      await useHistoryStore().record(this.shotId, label, this.frames, this.selectedFrameNo);
+    },
+    /** 撤销 / 重做恢复：用快照整段替换当前帧序，帧号、张数与明细一并回退 */
+    async restoreFrames(frames: FrameEntry[], selectedFrameNo: number | null) {
+      if (this.shotId === null) return;
+      const ordered = frames.map((f, idx) => ({ ...f, frameNo: idx + 1, shotId: this.shotId as number }));
+      await api.replaceShotFrames(this.shotId, toPlain(ordered));
+      this.frames = await api.listFrames(this.shotId);
+      this.selectedFrameNo =
+        selectedFrameNo !== null && this.frames.some((f) => f.frameNo === selectedFrameNo)
+          ? selectedFrameNo
+          : (this.frames[0]?.frameNo ?? null);
+      this.dirty = false;
+    },
     async insertAt(index: number, seed?: Partial<FrameEntry>) {
+      await this.recordHistory('插入帧');
       const base = createEmptyFrame(this.shotId ?? 0, index + 1);
       const anchor = this.frames[index - 1] ?? this.frames[0];
       const merged: FrameEntry = {
@@ -87,6 +106,7 @@ export const useFrameStore = defineStore('frame', {
     },
     async removeAt(index: number) {
       if (this.frames.length <= 1) return;
+      await this.recordHistory('删除帧');
       this.frames = this.frames.filter((_, i) => i !== index);
       this.frames = this.frames.map((f, idx) => ({ ...f, frameNo: idx + 1 }));
       this.dirty = true;
@@ -94,6 +114,7 @@ export const useFrameStore = defineStore('frame', {
     },
     async move(from: number, to: number) {
       if (from === to || from < 0 || to < 0 || from >= this.frames.length || to >= this.frames.length) return;
+      await this.recordHistory('移动帧');
       const next = this.frames.slice();
       const [moved] = next.splice(from, 1);
       next.splice(to, 0, moved);
@@ -103,6 +124,8 @@ export const useFrameStore = defineStore('frame', {
     },
     /** 批量套用曝光参数 */
     async applyBatch(batch: BatchExposure, indexes?: number[]) {
+      if (!this.frames.length) return;
+      await this.recordHistory(indexes && indexes.length ? '选中帧套用曝光' : '批量套用曝光');
       const target = indexes && indexes.length ? new Set(indexes) : null;
       this.frames = this.frames.map((f, idx) => {
         if (target && !target.has(idx)) return f;
@@ -121,6 +144,7 @@ export const useFrameStore = defineStore('frame', {
     async patchFrame(frameNo: number, patch: Partial<FrameEntry>) {
       const idx = this.frames.findIndex((f) => f.frameNo === frameNo);
       if (idx < 0) return;
+      await this.recordHistory('修改单帧参数');
       const next = { ...this.frames[idx], ...patch, updatedAt: Date.now() };
       this.frames = this.frames.map((f, i) => (i === idx ? next : f));
       if (typeof next.id === 'number') {
